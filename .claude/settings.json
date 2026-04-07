@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo \"[hook] 파일 저장됨: $(echo '$CLAUDE_TOOL_INPUT' | python3 -c \"import sys,json; d=json.load(sys.stdin); print(d.get('file_path','?'))\" 2>/dev/null || echo '?')\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "REPORT_COUNT=$(ls /home/deepgadget/MCS_log_analizer/reports/*.md 2>/dev/null | wc -l); echo \"[hook:Stop] 분석 완료. 누적 보고서 수: ${REPORT_COUNT}개\""
+          }
+        ]
+      }
+    ]
+  }
+}
