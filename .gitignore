@@ -1,1 +1,5 @@
 reports/
+*.tar.gz
+*.tar
+*.gz
+

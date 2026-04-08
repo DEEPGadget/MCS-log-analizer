@@ -86,8 +86,21 @@ if [ -f "$JOURNALCTL" ]; then
         | sort | uniq -c | sort -rn | head -50 \
         > "$PREPROCESS_DIR/journalctl-density.txt" 2>/dev/null || true
 
+    # 4) 부팅 경계 추출: "-- Boot" 마커 + 직전 20줄 / 직후 10줄
+    #    systemd 저널이 찍는 부팅 구분선. 재부팅 시점 목록 + 직전/직후 문맥 제공
+    #    - Boot 마커 직전 = 이전 세션 마지막 이벤트 (종료 원인 단서) — 서비스 종료 시퀀스가 수십 줄이므로 넉넉히
+    #    - Boot 마커 직후 = crash recovery, unexpected reboot 등 비정상 종료 증거
+    grep -n '^\-\- Boot' "$JOURNALCTL" > "$PREPROCESS_DIR/journalctl-boots.txt" 2>/dev/null || true
+    BOOT_COUNT=$(wc -l < "$PREPROCESS_DIR/journalctl-boots.txt" 2>/dev/null || echo 0)
+
+    # Boot 경계 직전 40줄 / 직후 10줄 추출 (종료 원인 포착 우선)
+    if [ "$BOOT_COUNT" -gt 0 ]; then
+        grep -n -B40 -A10 '^\-\- Boot' "$JOURNALCTL" \
+            > "$PREPROCESS_DIR/journalctl-boot-context.txt" 2>/dev/null || true
+    fi
+
     FILTERED_LINES=$(wc -l < "$PREPROCESS_DIR/journalctl-errors.txt" 2>/dev/null || echo 0)
-    info "  journalctl.txt: ${JCTL_LINES} 줄 → errors ${FILTERED_LINES} 줄로 축소"
+    info "  journalctl.txt: ${JCTL_LINES} 줄, 부팅 ${BOOT_COUNT}회 감지 → errors ${FILTERED_LINES} 줄로 축소"
 fi
 
 # --- syslog 전처리 ---
