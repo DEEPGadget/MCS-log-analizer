@@ -86,7 +86,7 @@ if [ -f "$JOURNALCTL" ]; then
         | sort | uniq -c | sort -rn | head -50 \
         > "$PREPROCESS_DIR/journalctl-density.txt" 2>/dev/null || true
 
-    # 4) 부팅 경계 추출: "-- Boot" 마커 + 직전 20줄 / 직후 10줄
+    # 4) 부팅 경계 추출: "-- Boot" 마커 + 직전 40줄 / 직후 10줄
     #    systemd 저널이 찍는 부팅 구분선. 재부팅 시점 목록 + 직전/직후 문맥 제공
     #    - Boot 마커 직전 = 이전 세션 마지막 이벤트 (종료 원인 단서) — 서비스 종료 시퀀스가 수십 줄이므로 넉넉히
     #    - Boot 마커 직후 = crash recovery, unexpected reboot 등 비정상 종료 증거
@@ -132,6 +132,28 @@ if [ -f "$DMESG" ]; then
     fi
 fi
 
+# --- system-logs/dmesg 전처리 (원본 전체 dmesg — err 미만 레벨 + 스택 트레이스 포함) ---
+# dmesg-errors.txt는 `dmesg -Tl err` 필터 결과라 스택 트레이스 줄이 잘린다.
+# 원본 dmesg(/var/log/dmesg 복사본)는 모든 레벨을 포함하므로 여기서 보완한다.
+DMESG_FULL="$EXTRACTED_DIR/system-logs/dmesg"
+if [ -f "$DMESG_FULL" ]; then
+    DMESG_FULL_LINES=$(wc -l < "$DMESG_FULL")
+    # 크래시 패턴: BUG:/Oops/panic 전후 문맥 포함 (스택 트레이스 캡처)
+    grep -nE 'panic|Oops|BUG:|Call Trace|RIP: ' \
+        "$DMESG_FULL" | head -500 \
+        > "$PREPROCESS_DIR/dmesg-crash-context.txt" 2>/dev/null || true
+    CRASH_LINES=$(wc -l < "$PREPROCESS_DIR/dmesg-crash-context.txt" 2>/dev/null || echo 0)
+    if [ "$CRASH_LINES" -gt 0 ]; then
+        # 크래시가 있으면 전후 문맥(스택 트레이스)을 별도로 추출
+        grep -nE 'panic|Oops|BUG:' -A30 -B2 \
+            "$DMESG_FULL" >> "$PREPROCESS_DIR/dmesg-crash-context.txt" 2>/dev/null || true
+    fi
+    # 일반 에러 필터 (dmesg-errors.txt 보완 — err 미만 레벨 포함)
+    grep -inE 'error|fail|warning|EDAC|MCE|Machine Check|I/O error|blk_update_request|SCSI|RAID|md:|NFS|Lustre|filesystem' \
+        "$DMESG_FULL" > "$PREPROCESS_DIR/dmesg-full-errors.txt" 2>/dev/null || true
+    info "  dmesg (full): ${DMESG_FULL_LINES} 줄 → crash-context ${CRASH_LINES} 줄, errors $(wc -l < "$PREPROCESS_DIR/dmesg-full-errors.txt") 줄"
+fi
+
 # --- 에러 빈도 집계 (전체 소스 통합) ---
 # 반복되는 동일 에러 메시지를 집약하여 Claude가 "N회 반복"으로 처리하도록 돕는다
 for src in "$PREPROCESS_DIR"/journalctl-errors.txt "$PREPROCESS_DIR"/syslog-errors.txt "$PREPROCESS_DIR"/kern-errors.txt; do
@@ -153,7 +175,7 @@ info "파일 매니페스트 생성 중..."
     echo "# 생성 시각: $(date -Iseconds)"
     echo "# 형식: [크기(bytes)] [파일경로]"
     echo "---"
-    find "$EXTRACTED_DIR" -type f -printf '%s %P\n' | sort -k2
+    find "$EXTRACTED_DIR" -type f -not -path "*/_preprocessed/*" -printf '%s %P\n' | sort -k2
 } > "$EXTRACTED_DIR/_manifest.txt"
 
 if [ -d "$PREPROCESS_DIR" ]; then
@@ -236,10 +258,13 @@ info "환경 감지 완료: $(grep 'ENV_TYPE' "$ENV_HINTS")"
 # ── Claude 프롬프트 구성 ───────────────────────────────────────────────────
 # CLAUDE.md의 분석 지침을 참조하도록 안내
 # Claude는 CLAUDE.md를 자동으로 읽으므로 간결하게 작성
+ANALYSIS_START_TIME="$(date '+%Y-%m-%d %H:%M KST')"
+
 PROMPT="로그 분석 작업을 시작합니다.
 
 압축 해제된 진단 아카이브 경로: ${EXTRACTED_DIR}
 보고서 저장 경로: ${REPORT_FILE}
+분석 시작 시각: ${ANALYSIS_START_TIME} (보고서 메타데이터의 분석 일시에 이 값을 사용하세요)
 
 전처리 결과: ${EXTRACTED_DIR}/_preprocessed/ 디렉터리에 정제된 로그 파일이 있습니다.
 환경 정보: ${EXTRACTED_DIR}/_env-hints.txt
