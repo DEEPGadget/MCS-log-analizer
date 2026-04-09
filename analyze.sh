@@ -73,7 +73,7 @@ if [ -f "$JOURNALCTL" ]; then
     info "  journalctl.txt: ${JCTL_LINES} 줄 → 전처리 시작"
 
     # 1) 키워드 필터: 알려진 문제 패턴
-    grep -inE 'fail|error|oom|panic|segfault|critical|watchdog|killed|warning.*:' \
+    grep -inE 'fail|error|oom|panic|segfault|critical|watchdog|killed|warning.*:|BUG:|Oops:' \
         "$JOURNALCTL" > "$PREPROCESS_DIR/journalctl-errors.txt" 2>/dev/null || true
 
     # 2) 구조적 이벤트: 키워드로 못 잡는 시스템 상태 변화
@@ -106,7 +106,7 @@ fi
 # --- syslog 전처리 ---
 SYSLOG="$EXTRACTED_DIR/system-logs/syslog"
 if [ -f "$SYSLOG" ]; then
-    grep -inE 'error|fatal|fail|oom|panic|authentication failure|Failed password|disk I/O|read error|CRON.*ERROR' \
+    grep -inE 'error|fatal|fail|oom|panic|BUG:|Oops:|authentication failure|Failed password|disk I/O|read error|CRON.*ERROR' \
         "$SYSLOG" > "$PREPROCESS_DIR/syslog-errors.txt" 2>/dev/null || true
     info "  syslog: $(wc -l < "$SYSLOG") 줄 → errors $(wc -l < "$PREPROCESS_DIR/syslog-errors.txt") 줄"
 fi

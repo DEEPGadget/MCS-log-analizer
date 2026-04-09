@@ -47,12 +47,12 @@ MCS-log-analizer/
 
 | 순위 | 항목 |
 |------|------|
-| 1순위 | dmesg 오류, GPU ECC/리매핑 오류, SMART (SATA·NVMe) |
-| 2순위 | journalctl, syslog, kern.log |
-| 3순위 | 디스크 사용량, 온도·센서, IPMI, RAID |
+| 1순위 | dmesg 오류, GPU ECC/리매핑 오류, SMART (SATA·NVMe, 온도 이력·써멀 스로틀링 포함) |
+| 2순위 | journalctl, syslog, kern.log (커널 BUG:/Oops: 포함) |
+| 3순위 | 디스크 사용량, 온도·센서, IPMI, RAID, PCIe Link Speed |
 | 4순위 | nvidia-smi, apt 이력, 서비스 상태, 업타임 |
 
-보고서에는 Critical / Warning / Info 심각도 분류와 시간 상관관계 분석이 포함됩니다.
+보고서에는 하드웨어 인벤토리(CPU/GPU/메모리/스토리지/IB/PCIe), Critical / Warning / Info 심각도 분류, 시간 상관관계 분석이 포함됩니다.
 
 ## 요구 사항
 
