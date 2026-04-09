@@ -33,9 +33,13 @@ MCS-log-analizer/
 ## 동작 방식
 
 1. `analyze.sh`가 `.tar.gz` 아카이브를 임시 디렉터리에 압축 해제
-2. Claude Code(`-p` print 모드)를 비대화형으로 실행
-3. Claude가 `CLAUDE.md`의 지침에 따라 로그 파일을 분석 (2-pass 전략)
-4. `reports/` 경로에 마크다운 보고서 저장 후 콘솔에 1~3줄 요약 출력
+2. bash로 대형 로그 파일을 전처리하여 `_preprocessed/` 디렉터리에 저장
+   - journalctl → 에러 필터, 구조적 이벤트, 밀도 분석, 부팅 경계 추출
+   - syslog / kern.log → 에러 필터
+   - dmesg (전체) → 크래시 문맥(스택 트레이스 포함), 에러 필터
+3. Claude Code(`-p` print 모드)를 비대화형으로 실행
+4. Claude가 `CLAUDE.md`의 지침에 따라 전처리 파일 기반으로 분석 (2-pass 전략)
+5. `reports/` 경로에 마크다운 보고서 저장 후 콘솔에 1~3줄 요약 출력
 
 분석 대상 로그 아카이브는 `deepgadget-log-grabber.sh`로 수집된 것을 기준으로 합니다.
 
