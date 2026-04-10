@@ -9,7 +9,7 @@ Manycore 고객사 서버에서 수집된 진단 아카이브(`.tar.gz`)를 Clau
 MCS-log-analizer/
 ├── analyze.sh          # 진입점 — 아카이브 압축 해제 후 Claude 자동 실행
 ├── CLAUDE.md           # Claude 분석 지침 (분석 기준, 보고서 형식 정의)
-├── reports/            # 생성된 보고서 저장 위치 (.gitignore 처리됨)
+├── reports/            # 생성된 보고서 저장 위치
 └── .claude/
     └── settings.json   # Claude Code 권한 및 Hook 설정
 ```
@@ -62,4 +62,3 @@ MCS-log-analizer/
 ## 참고
 
 - 분석 기준 및 보고서 형식 상세: [`CLAUDE.md`](CLAUDE.md)
-- 보고서는 민감한 고객 정보를 포함할 수 있으므로 `reports/`는 `.gitignore` 처리되어 있습니다.
