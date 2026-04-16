@@ -7,11 +7,13 @@ Manycore 고객사 서버에서 수집된 진단 아카이브(`.tar.gz`)를 Clau
 
 ```
 MCS-log-analizer/
-├── analyze.sh          # 진입점 — 아카이브 압축 해제, 전처리, Claude 자동 실행
-├── CLAUDE.md           # Claude 분석 지침 (분석 기준, 보고서 형식, 하네스 규칙)
-├── reports/            # 생성된 보고서 저장 위치
+├── analyze.sh             # 진입점 — 아카이브 압축 해제, 전처리, Claude 자동 실행
+├── CLAUDE.md              # Claude 분석 지침 (분석 기준, 하네스 규칙)
+├── report-template.md     # 보고서 마크다운 형식 템플릿
+├── correlation-guide.md   # 시간 상관관계 분석 방법론
+├── reports/               # 생성된 보고서 저장 위치
 └── .claude/
-    └── settings.json   # Claude Code 권한 및 Hook 설정
+    └── settings.json      # Claude Code 권한 및 Hook 설정
 ```
 
 ## 사용법
@@ -55,7 +57,7 @@ MCS-log-analizer/
 | 순위 | 항목 |
 |------|------|
 | 1순위 | dmesg 오류, GPU ECC/리매핑 오류, SMART (SATA·NVMe, 온도 이력·써멀 스로틀링 포함) |
-| 2순위 | journalctl, syslog, kern.log (커널 BUG:/Oops: 포함, journalctl은 원본 직접 Grep) |
+| 2순위 | journalctl, syslog, kern.log (커널 BUG:/Oops: 포함, 전처리 파일 기반 분석) |
 | 3순위 | 디스크 사용량, 온도·센서, IPMI, RAID, PCIe Link Speed |
 | 4순위 | nvidia-smi, apt 이력, 서비스 상태(unattended-upgrades·절전 설정 포함), 업타임 |
 
