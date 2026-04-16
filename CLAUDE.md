@@ -306,7 +306,6 @@ NVMe인지 SATA인지 구분법:
 
 - **총 GPU 수**: N개
 - **드라이버 버전**: [nvidia-smi.txt에서 추출]
-- **CUDA 버전**: [nvidia-smi.txt에서 추출]
 
 **데이터 소스**: `nvidia-smi.txt`, `gpu-serials.txt`
 
