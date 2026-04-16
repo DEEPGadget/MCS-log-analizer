@@ -6,7 +6,7 @@ Manycore 고객사 서버에서 수집된 진단 아카이브(`.tar.gz`)를 Clau
 ## 구조
 
 ```
-MCS-log-analizer/
+MCS-log-analyzer/
 ├── analyze.sh             # 진입점 — 아카이브 압축 해제, 전처리, Claude 자동 실행
 ├── CLAUDE.md              # Claude 분석 지침 (분석 기준, 하네스 규칙)
 ├── report-template.md     # 보고서 마크다운 형식 템플릿
