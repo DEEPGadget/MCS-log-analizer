@@ -1,18 +1,6 @@
 # MCS Log Analyzer — Claude Harness
 
-## 하네스 구조 (Harness Engineering)
-
-> **Harness Engineering**: 어떤 환경과 규칙 안에서 일하게 할지 정하는 일
-
-이 프로젝트는 3개 레이어로 구성된 하네스다:
-
-| 레이어 | 파일 | 역할 |
-|--------|------|------|
-| **지식 레이어** | `CLAUDE.md` (이 파일) | Claude가 읽는 규칙과 분석 기준 |
-| **도구 레이어** | `Read`, `Grep`, `Write` | 로그 파일 읽기 및 보고서 저장 |
-| **통제 레이어** | `.claude/settings.json` | Hook으로 자동 개입 규칙 정의 |
-
-### 권한 정책
+## 권한 정책
 
 - **허용**: `Read` (압축 해제 경로 전체), `Grep` (패턴 검색), `Write` (`reports/` 경로만)
 - **Approval 필요**: 기존 보고서 파일 덮어쓰기 (같은 이름의 `.md`가 이미 존재하는 경우)

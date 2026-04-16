@@ -26,7 +26,7 @@ MCS-log-analizer/
 ./analyze.sh /path/to/Manycore-bug-report.tar.gz
 
 # 예시 2: 보고서 이름 직접 지정
-./analyze.sh /path/to/Manycore-bug-report.tar.gz KIST-2025-04-29
+./analyze.sh /path/to/Manycore-bug-report.tar.gz Customer-2025-04-29
 ```
 
 보고서는 `reports/` 디렉터리에 마크다운 파일로 저장됩니다.
@@ -62,22 +62,7 @@ MCS-log-analizer/
 
 보고서에는 하드웨어 인벤토리(CPU/GPU/메모리/스토리지/IB/PCIe Link Speed), Critical / Warning / Info 심각도 분류, 시간 상관관계 분석이 포함됩니다.
 
-## 하네스 구조
-
-이 시스템은 3개 레이어로 구성된 Claude Code harness입니다:
-
-| 레이어 | 파일 | 역할 |
-|--------|------|------|
-| 지식 레이어 | `CLAUDE.md` | 분석 규칙, 판정 기준, 보고서 형식 |
-| 도구 레이어 | `Read`, `Grep`, `Write` | 로그 읽기, 패턴 검색, 보고서 저장 |
-| 통제 레이어 | `.claude/settings.json` | 권한 정책, Hook |
-
 ## 요구 사항
 
 - [Claude Code](https://claude.ai/code) CLI (`claude` 명령어가 PATH에 있어야 함)
 - `bash`, `tar`
-
-## 참고
-
-- 분석 기준 및 보고서 형식 상세: [`CLAUDE.md`](CLAUDE.md)
-- 설계 문서: `documents/` 디렉터리 (로컬 전용, `.gitignore` 처리됨)
