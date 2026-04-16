@@ -7,9 +7,10 @@ Manycore 고객사 서버에서 수집된 진단 아카이브(`.tar.gz`)를 Clau
 
 ```
 MCS-log-analizer/
-├── analyze.sh          # 진입점 — 아카이브 압축 해제 후 Claude 자동 실행
-├── CLAUDE.md           # Claude 분석 지침 (분석 기준, 보고서 형식 정의)
+├── analyze.sh          # 진입점 — 아카이브 압축 해제, 전처리, Claude 자동 실행
+├── CLAUDE.md           # Claude 분석 지침 (분석 기준, 보고서 형식, 하네스 규칙)
 ├── reports/            # 생성된 보고서 저장 위치
+├── improvement-plans/  # 개선 계획서
 └── .claude/
     └── settings.json   # Claude Code 권한 및 Hook 설정
 ```
@@ -32,14 +33,21 @@ MCS-log-analizer/
 
 ## 동작 방식
 
-1. `analyze.sh`가 `.tar.gz` 아카이브를 임시 디렉터리에 압축 해제
-2. bash로 대형 로그 파일을 전처리하여 `_preprocessed/` 디렉터리에 저장
-   - journalctl → 에러 필터, 구조적 이벤트, 밀도 분석, 부팅 경계 추출
-   - syslog / kern.log → 에러 필터
-   - dmesg (전체) → 크래시 문맥(스택 트레이스 포함), 에러 필터
-3. Claude Code(`-p` print 모드)를 비대화형으로 실행
-4. Claude가 `CLAUDE.md`의 지침에 따라 전처리 파일 기반으로 분석 (2-pass 전략)
-5. `reports/` 경로에 마크다운 보고서 저장 후 콘솔에 1~3줄 요약 출력
+1. `analyze.sh`가 `.tar.gz` 아카이브를 임시 디렉터리(`/tmp/mcs-log-XXXXX`)에 압축 해제
+2. bash로 대형 로그 파일을 전처리하여 `_preprocessed/` 디렉터리에 저장 (토큰 비용 0):
+   - `journalctl.txt` → 에러 필터, 구조적 이벤트(lifecycle), 분 단위 밀도, 부팅 경계(boots/context)
+   - `syslog` / `kern.log` → 에러 패턴 필터
+   - `dmesg` (원본) → 크래시 문맥(스택 트레이스 포함), 에러 필터
+   - 에러 메시지 빈도 집계 (`*-frequency.txt`)
+3. 파일 매니페스트(`_manifest.txt`) 및 환경 감지 결과(`_env-hints.txt`) 생성
+4. Claude Code(`-p` print 모드)를 비대화형으로 실행
+5. Claude가 `CLAUDE.md`의 지침에 따라 2-pass 전략으로 분석:
+   - **Pass 1 (Triage)**: 전처리 파일과 인벤토리 파일 Read → 전체 이슈 파악
+   - **Pass 2 (Deep-dive)**: Critical/Warning 발견 영역의 원본 파일을 Grep → 문맥·인과관계 확인
+6. `reports/` 경로에 마크다운 보고서 저장 후 콘솔에 1~3줄 요약 출력
+
+> **참고**: 아카이브에 파일이 200개를 초과하거나 `var-log-archived/` 디렉터리가 존재하면
+> Claude는 분석 전 Plan Mode로 탐색 범위를 확정한 뒤 실행합니다.
 
 분석 대상 로그 아카이브는 `deepgadget-log-grabber.sh`로 수집된 것을 기준으로 합니다.
 
@@ -48,11 +56,21 @@ MCS-log-analizer/
 | 순위 | 항목 |
 |------|------|
 | 1순위 | dmesg 오류, GPU ECC/리매핑 오류, SMART (SATA·NVMe, 온도 이력·써멀 스로틀링 포함) |
-| 2순위 | journalctl, syslog, kern.log (커널 BUG:/Oops: 포함) |
+| 2순위 | journalctl, syslog, kern.log (커널 BUG:/Oops: 포함, journalctl은 원본 직접 Grep) |
 | 3순위 | 디스크 사용량, 온도·센서, IPMI, RAID, PCIe Link Speed |
-| 4순위 | nvidia-smi, apt 이력, 서비스 상태, 업타임 |
+| 4순위 | nvidia-smi, apt 이력, 서비스 상태(unattended-upgrades·절전 설정 포함), 업타임 |
 
-보고서에는 하드웨어 인벤토리(CPU/GPU/메모리/스토리지/IB/PCIe), Critical / Warning / Info 심각도 분류, 시간 상관관계 분석이 포함됩니다.
+보고서에는 하드웨어 인벤토리(CPU/GPU/메모리/스토리지/IB/PCIe Link Speed), Critical / Warning / Info 심각도 분류, 시간 상관관계 분석이 포함됩니다.
+
+## 하네스 구조
+
+이 시스템은 3개 레이어로 구성된 Claude Code harness입니다:
+
+| 레이어 | 파일 | 역할 |
+|--------|------|------|
+| 지식 레이어 | `CLAUDE.md` | 분석 규칙, 판정 기준, 보고서 형식 |
+| 도구 레이어 | `Read`, `Grep`, `Write` | 로그 읽기, 패턴 검색, 보고서 저장 |
+| 통제 레이어 | `.claude/settings.json` | 권한 정책, Hook |
 
 ## 요구 사항
 
@@ -62,3 +80,4 @@ MCS-log-analizer/
 ## 참고
 
 - 분석 기준 및 보고서 형식 상세: [`CLAUDE.md`](CLAUDE.md)
+- 설계 문서: `documents/` 디렉터리 (로컬 전용, `.gitignore` 처리됨)
