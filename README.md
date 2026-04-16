@@ -1,4 +1,4 @@
-# MCS Log Analyzer
+# MCS-log-analyzer
 
 Manycore 고객사 서버에서 수집된 진단 아카이브(`.tar.gz`)를 Claude AI로 분석하여
 잠재적 문제를 탐지하고 한국어 보고서를 자동 생성하는 도구입니다.
@@ -10,7 +10,6 @@ MCS-log-analizer/
 ├── analyze.sh          # 진입점 — 아카이브 압축 해제, 전처리, Claude 자동 실행
 ├── CLAUDE.md           # Claude 분석 지침 (분석 기준, 보고서 형식, 하네스 규칙)
 ├── reports/            # 생성된 보고서 저장 위치
-├── improvement-plans/  # 개선 계획서
 └── .claude/
     └── settings.json   # Claude Code 권한 및 Hook 설정
 ```
