@@ -3,3 +3,4 @@ reports/
 *.tar
 *.gz
 documents/
+*:Zone.Identifier
