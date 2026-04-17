@@ -85,13 +85,60 @@ if [ -f "$JOURNALCTL" ]; then
     JCTL_LINES=$(wc -l < "$JOURNALCTL")
     info "  journalctl.txt: ${JCTL_LINES} 줄 → 전처리 시작"
 
-    # 1) 키워드 필터: 알려진 문제 패턴
-    grep -inE 'fail|error|oom|panic|segfault|critical|watchdog|killed|warning.*:|BUG:|Oops:' \
-        "$JOURNALCTL" > "$PREPROCESS_DIR/journalctl-errors.txt" 2>/dev/null || true
+    # 1a) Tier 1: 하드 크리티컬 — 4가지 유형별로 dedup·크기 제한하여 결합
+    #     문제: 단순 grep으로는 soft lockup·MCE·EDAC 반복 이벤트가 수만 줄 생성
+    #     해결: 유형별로 분리하여 반복성 이벤트는 dedup+head, 단발성은 전체 보존
+    {
+        # (A) 단발성 크리티컬 — panic/OOM/segfault/I/O error (보통 수십 줄)
+        grep -iE 'kernel panic|Oops:|oom-kill|Out of memory:|segfault|I/O error|blk_update_request' \
+            "$JOURNALCTL" 2>/dev/null | head -100
+
+        # (B) soft lockup — 처음 발생 1줄 + 마지막(최대 stuck) 1줄 + 총 횟수
+        _LOCKUP=$(grep 'watchdog: BUG: soft lockup' "$JOURNALCTL" 2>/dev/null)
+        if [ -n "$_LOCKUP" ]; then
+            printf '# soft lockup 이벤트 (첫 발생 ~ 최대 stuck):\n'
+            printf '%s\n' "$_LOCKUP" | head -1
+            printf '%s\n' "$_LOCKUP" | tail -1
+            printf '# (총 %d줄 반복)\n' "$(printf '%s\n' "$_LOCKUP" | wc -l)"
+        fi
+
+        # (C) MCE/EDAC/Hardware Error — dedup 후 빈도 상위 30줄
+        printf '# MCE/EDAC/Hardware Error (dedup):\n'
+        grep -iE 'EDAC|Machine Check|MCE|Hardware Error' "$JOURNALCTL" 2>/dev/null \
+            | sed -E 's/^[A-Za-z]+ {1,2}[0-9]+ [0-9:]+ [^ ]+ //' \
+            | sort | uniq -c | sort -rn | head -30
+
+        # (D) Call Trace 스택 — Modules linked in 제거, 함수 경로만 (head -80)
+        printf '# Call Trace / RIP (함수 경로):\n'
+        grep -E 'Call Trace:|RIP: 0010:|^\s+\? |BUG: ' "$JOURNALCTL" 2>/dev/null \
+            | grep -v 'Modules linked in\|soft lockup' | head -80
+    } > "$PREPROCESS_DIR/journalctl-critical.txt" 2>/dev/null || true
+
+    # 1b) Tier 2: 광범위 패턴 → 타임스탬프·호스트명 제거 후 중복 제거 → 빈도 상위 200행
+    #     수십만 줄 → 200줄 빈도표로 압축. 형식: "  횟수 process: 메시지"
+    grep -iE 'fail|error|warning|killed|watchdog|critical|oom|panic|segfault' "$JOURNALCTL" \
+        | sed -E 's/^[A-Za-z]+ {1,2}[0-9]+ [0-9:]+ [^ ]+ //' \
+        | sort | uniq -c | sort -rn | head -200 \
+        > "$PREPROCESS_DIR/journalctl-errors.txt" 2>/dev/null || true
+
+    # 1c) 서비스 재시작 루프 감지 — restart counter가 높은 서비스 요약
+    #     vscode-server 등 잘못 설치된 서비스가 수만 번 반복 재시작하는 케이스를 잡음
+    {
+        printf '# 서비스 재시작 루프 (restart counter 최고값 상위 10개)\n'
+        grep 'restart counter is at' "$JOURNALCTL" 2>/dev/null \
+            | grep -oE '[a-zA-Z0-9_@.\\-]+\.service.*restart counter is at [0-9]+' \
+            | awk '{svc=$1; sub(/\.service.*/, "", svc); n=$NF; if (n > max[svc]) max[svc]=n} END {for (s in max) printf "%7d  %s\n", max[s], s}' \
+            | sort -rn | head -10
+        printf '\n# 서비스별 대표 에러 메시지 (dedup)\n'
+        grep -E 'Failed to determine user credentials|start request repeated too quickly|Main process exited.*status=217' \
+            "$JOURNALCTL" 2>/dev/null \
+            | sed -E 's/^[A-Za-z]+ {1,2}[0-9]+ [0-9:]+ [^ ]+ //' \
+            | sort | uniq -c | sort -rn | head -10
+    } > "$PREPROCESS_DIR/journalctl-service-loops.txt" 2>/dev/null || true
 
     # 2) 구조적 이벤트: 키워드로 못 잡는 시스템 상태 변화
     grep -inE 'Reached target.*(Power-Off|Reboot|Shutdown|Multi-User)|logind.*(Power key|Lid|Suspend)|Started.*Shutdown|Stopping|Started.*Reboot|shutdown\[|reboot\[|Power-Off' \
-        "$JOURNALCTL" > "$PREPROCESS_DIR/journalctl-lifecycle.txt" 2>/dev/null || true
+        "$JOURNALCTL" | head -500 > "$PREPROCESS_DIR/journalctl-lifecycle.txt" 2>/dev/null || true
 
     # 3) 시간대별 로그 밀도 (분 단위, 상위 50개 — 비정상 폭주 구간 탐지)
     #    특정 분에 로그가 수천 줄 몰리면 그 시간대에 사건 발생
@@ -109,18 +156,21 @@ if [ -f "$JOURNALCTL" ]; then
     # Boot 경계 직전 40줄 / 직후 10줄 추출 (종료 원인 포착 우선)
     if [ "$BOOT_COUNT" -gt 0 ]; then
         grep -n -B40 -A10 '^\-\- Boot' "$JOURNALCTL" \
+            | tail -2500 \
             > "$PREPROCESS_DIR/journalctl-boot-context.txt" 2>/dev/null || true
     fi
 
+    CRITICAL_LINES=$(wc -l < "$PREPROCESS_DIR/journalctl-critical.txt" 2>/dev/null || echo 0)
     FILTERED_LINES=$(wc -l < "$PREPROCESS_DIR/journalctl-errors.txt" 2>/dev/null || echo 0)
-    info "  journalctl.txt: ${JCTL_LINES} 줄, 부팅 ${BOOT_COUNT}회 감지 → errors ${FILTERED_LINES} 줄로 축소"
+    LOOP_LINES=$(wc -l < "$PREPROCESS_DIR/journalctl-service-loops.txt" 2>/dev/null || echo 0)
+    info "  journalctl.txt: ${JCTL_LINES} 줄, 부팅 ${BOOT_COUNT}회 → critical ${CRITICAL_LINES} 줄, errors-dedup ${FILTERED_LINES} 줄, service-loops ${LOOP_LINES} 줄"
 fi
 
 # --- syslog 전처리 ---
 SYSLOG="$EXTRACTED_DIR/system-logs/syslog"
 if [ -f "$SYSLOG" ]; then
     grep -inE 'error|fatal|fail|oom|panic|BUG:|Oops:|authentication failure|Failed password|disk I/O|read error|CRON.*ERROR' \
-        "$SYSLOG" > "$PREPROCESS_DIR/syslog-errors.txt" 2>/dev/null || true
+        "$SYSLOG" | head -500 > "$PREPROCESS_DIR/syslog-errors.txt" 2>/dev/null || true
     info "  syslog: $(wc -l < "$SYSLOG") 줄 → errors $(wc -l < "$PREPROCESS_DIR/syslog-errors.txt") 줄"
 fi
 
@@ -128,7 +178,7 @@ fi
 KERNLOG="$EXTRACTED_DIR/system-logs/kern.log"
 if [ -f "$KERNLOG" ]; then
     grep -inE 'error|warning|fail|EXT4-fs error|XFS error|link is not ready|Link is Down|I/O error|oom|panic|MCE|EDAC' \
-        "$KERNLOG" > "$PREPROCESS_DIR/kern-errors.txt" 2>/dev/null || true
+        "$KERNLOG" | head -300 > "$PREPROCESS_DIR/kern-errors.txt" 2>/dev/null || true
     info "  kern.log: $(wc -l < "$KERNLOG") 줄 → errors $(wc -l < "$PREPROCESS_DIR/kern-errors.txt") 줄"
 fi
 
@@ -163,13 +213,13 @@ if [ -f "$DMESG_FULL" ]; then
     fi
     # 일반 에러 필터 (dmesg-errors.txt 보완 — err 미만 레벨 포함)
     grep -inE 'error|fail|warning|EDAC|MCE|Machine Check|I/O error|blk_update_request|SCSI|RAID|md:|NFS|Lustre|filesystem' \
-        "$DMESG_FULL" > "$PREPROCESS_DIR/dmesg-full-errors.txt" 2>/dev/null || true
+        "$DMESG_FULL" | head -300 > "$PREPROCESS_DIR/dmesg-full-errors.txt" 2>/dev/null || true
     info "  dmesg (full): ${DMESG_FULL_LINES} 줄 → crash-context ${CRASH_LINES} 줄, errors $(wc -l < "$PREPROCESS_DIR/dmesg-full-errors.txt") 줄"
 fi
 
 # --- 에러 빈도 집계 (전체 소스 통합) ---
 # 반복되는 동일 에러 메시지를 집약하여 Claude가 "N회 반복"으로 처리하도록 돕는다
-for src in "$PREPROCESS_DIR"/journalctl-errors.txt "$PREPROCESS_DIR"/syslog-errors.txt "$PREPROCESS_DIR"/kern-errors.txt; do
+for src in "$PREPROCESS_DIR"/syslog-errors.txt "$PREPROCESS_DIR"/kern-errors.txt; do
     if [ -f "$src" ]; then
         basename_src="$(basename "$src" .txt)"
         # 타임스탬프 제거 후 메시지 본문만으로 빈도 집계
@@ -263,6 +313,23 @@ ECC_SUMMARY="$PREPROCESS_DIR/_ecc-summary.txt"
     done
 } > "$ECC_SUMMARY" 2>/dev/null || true
 [ -s "$ECC_SUMMARY" ] && info "  gpu-memory-errors/ → _ecc-summary.txt ($(wc -l < "$ECC_SUMMARY") 줄)"
+
+# --- systemctl-services.txt → 서비스 요약 (_systemctl-summary.txt) ---
+SYSTEMCTL_FILE="$EXTRACTED_DIR/systemctl-services.txt"
+if [ -f "$SYSTEMCTL_FILE" ]; then
+    {
+        echo "# systemctl 서비스 요약"
+        printf '\n## Failed 서비스\n'
+        grep -E 'failed' "$SYSTEMCTL_FILE" | head -30 || echo "(없음)"
+        printf '\n## 서버 운영 관련 서비스 (masked/disabled 여부)\n'
+        for svc in unattended-upgrades.service sleep.target suspend.target hibernate.target hybrid-sleep.target; do
+            result=$(grep -m1 "$svc" "$SYSTEMCTL_FILE" 2>/dev/null || echo "$svc: (목록에 없음 — masked 가능)")
+            echo "$result"
+        done
+    } > "$PREPROCESS_DIR/_systemctl-summary.txt" 2>/dev/null || true
+    ORIG_LINES=$(wc -l < "$SYSTEMCTL_FILE")
+    info "  systemctl-services.txt: ${ORIG_LINES} 줄 → _systemctl-summary.txt ($(wc -l < "$PREPROCESS_DIR/_systemctl-summary.txt") 줄)"
+fi
 
 info "로그 전처리 완료 → $PREPROCESS_DIR/"
 
