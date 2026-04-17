@@ -9,6 +9,19 @@
 
 set -euo pipefail
 
+# ── 모델 선택 및 인자 파싱 ─────────────────────────────────────────────────
+# 사용: ./analyze.sh <tarball> [report-name] [--model <model-id>]
+# 예시: ./analyze.sh file.tar.gz name --model claude-haiku-4-5-20251001
+MODEL="claude-sonnet-4-6"
+POSITIONAL=()
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --model|-m) MODEL="$2"; shift 2 ;;
+        *)          POSITIONAL+=("$1"); shift ;;
+    esac
+done
+(( ${#POSITIONAL[@]} > 0 )) && set -- "${POSITIONAL[@]}"
+
 # ── 색상 출력 ──────────────────────────────────────────────────────────────
 RED='\033[0;31m'; YELLOW='\033[1;33m'; GREEN='\033[0;32m'; NC='\033[0m'
 info()  { echo -e "${GREEN}[*]${NC} $*"; }
@@ -166,6 +179,91 @@ for src in "$PREPROCESS_DIR"/journalctl-errors.txt "$PREPROCESS_DIR"/syslog-erro
     fi
 done
 
+# --- hw-list.txt → 하드웨어 요약 (_hw-summary.txt) ---
+# Claude의 *-core/*-cpu/*-memory/*-bank Grep 4회를 Read 1회로 대체
+HW_LIST="$EXTRACTED_DIR/hw-list.txt"
+if [ -f "$HW_LIST" ]; then
+    {
+        echo "# hw-list 하드웨어 요약 (hw-list.txt에서 추출)"
+        printf '\n## 메인보드 (*-core)\n'
+        grep -m1 -A20 '^\s*\*-core' "$HW_LIST" \
+            | grep -E '^\s+(description|product|vendor):' | head -5
+        printf '\n## CPU (*-cpu)\n'
+        grep -A50 '^\s*\*-cpu' "$HW_LIST" \
+            | grep -E '^\s+(description|product|slot|capacity|width|clock):' | head -30
+        printf '\n## 메모리 총량 (*-memory)\n'
+        grep -m1 -A15 '^\s*\*-memory$' "$HW_LIST" \
+            | grep -E '^\s+(description|size|capabilities):' | head -5
+        printf '\n## 메모리 슬롯 (*-bank)\n'
+        grep -A20 '^\s*\*-bank' "$HW_LIST" \
+            | grep -E '(\*-bank|^\s+(slot|size|product|description|clock):)' | head -80
+    } > "$PREPROCESS_DIR/_hw-summary.txt" 2>/dev/null || true
+    info "  hw-list.txt → _hw-summary.txt ($(wc -l < "$PREPROCESS_DIR/_hw-summary.txt") 줄)"
+fi
+
+# --- nvidia-smi.txt → GPU 요약 (_nvidia-summary.txt) ---
+NVIDIA_SMI="$EXTRACTED_DIR/nvidia-smi.txt"
+if [ -f "$NVIDIA_SMI" ]; then
+    {
+        echo "# nvidia-smi GPU 요약"
+        grep -E 'Driver Version|CUDA Version' "$NVIDIA_SMI" | head -3
+        printf '\n'
+        if grep -q '^\+' "$NVIDIA_SMI" 2>/dev/null; then
+            # 기본 테이블 형식 (nvidia-smi)
+            grep -E '^\+[-=]|^\| ' "$NVIDIA_SMI" | head -40
+        else
+            # 상세 형식 (nvidia-smi -q)
+            grep -E 'GPU [0-9]+|Product Name|Bus-Id|ECC Mode|ECC Errors|Uncorrected|Corrected|Temperature|Fan Speed|Memory.*Used|Memory.*Free|Memory.*Total|Serial' \
+                "$NVIDIA_SMI" | head -60
+        fi
+    } > "$PREPROCESS_DIR/_nvidia-summary.txt" 2>/dev/null || true
+    info "  nvidia-smi.txt → _nvidia-summary.txt ($(wc -l < "$PREPROCESS_DIR/_nvidia-summary.txt") 줄)"
+fi
+
+# --- smartctl-*.txt → SMART 요약 (_smart-summary.txt) ---
+# 드라이브당 100~200줄 원본 → 드라이브당 10~30줄 핵심 속성만 추출
+SMART_SUMMARY="$PREPROCESS_DIR/_smart-summary.txt"
+{
+    echo "# SMART 요약 (smartctl-*.txt에서 추출)"
+    for sfile in "$EXTRACTED_DIR/drives-and-storage/smartctl-"*.txt; do
+        [ -f "$sfile" ] || continue
+        dname=$(basename "$sfile" .txt | sed 's/^smartctl-//')
+        printf '\n## 드라이브: %s\n' "$dname"
+        # 공통: 장치 식별 + 건강 판정
+        grep -E 'Device Model:|Model Number:|Serial Number:|Firmware Version:|SMART overall-health|SMART Status:|Terminate command early' \
+            "$sfile" | head -6
+        # SATA/SAS: 핵심 불량 속성만
+        if grep -q 'SMART Attributes Data Structure' "$sfile" 2>/dev/null; then
+            echo "[SATA]"
+            grep -E 'Reallocated_Sector_Ct|Current_Pending_Sector|Offline_Uncorrectable|Reallocated_Event_Count|Uncorrectable_Error_Cnt|Elements in grown defect' \
+                "$sfile"
+        fi
+        # NVMe: Health Information 섹션 + 써멀 스로틀링
+        if grep -q 'SMART/Health Information' "$sfile" 2>/dev/null; then
+            echo "[NVMe]"
+            awk '/SMART\/Health Information/,/^[[:space:]]*$/' "$sfile" | head -25
+            grep -E 'Thermal Temp\. [12]|Warning.*Comp\. Temp|Critical.*Comp\. Temp' "$sfile"
+        fi
+    done
+} > "$SMART_SUMMARY" 2>/dev/null || true
+[ -s "$SMART_SUMMARY" ] && info "  smartctl-*.txt → _smart-summary.txt ($(wc -l < "$SMART_SUMMARY") 줄)"
+
+# --- gpu-memory-errors/ → ECC 요약 (_ecc-summary.txt) ---
+# 3개 파일을 1개로 통합하여 Read 3회 → 1회
+ECC_SUMMARY="$PREPROCESS_DIR/_ecc-summary.txt"
+{
+    echo "# GPU ECC / 리매핑 요약"
+    for eccfile in \
+        "$EXTRACTED_DIR/gpu-memory-errors/uncorrected-ecc_errors.txt" \
+        "$EXTRACTED_DIR/gpu-memory-errors/remapped-memory.txt" \
+        "$EXTRACTED_DIR/gpu-memory-errors/ecc-errors.txt"; do
+        [ -f "$eccfile" ] || continue
+        printf '\n## %s\n' "$(basename "$eccfile")"
+        head -20 "$eccfile"
+    done
+} > "$ECC_SUMMARY" 2>/dev/null || true
+[ -s "$ECC_SUMMARY" ] && info "  gpu-memory-errors/ → _ecc-summary.txt ($(wc -l < "$ECC_SUMMARY") 줄)"
+
 info "로그 전처리 완료 → $PREPROCESS_DIR/"
 
 # ── 파일 매니페스트 생성 ───────────────────────────────────────────────────
@@ -281,7 +379,7 @@ CLAUDE.md의 분석 가이드라인을 따라 위 경로의 로그 파일들을 
 echo ""
 info "Claude 분석 시작..."
 echo "────────────────────────────────────────────────────────────────"
-claude --dangerously-skip-permissions -p "$PROMPT"
+claude --dangerously-skip-permissions -p "$PROMPT" --model "$MODEL"
 echo "────────────────────────────────────────────────────────────────"
 
 # ── 결과 확인 ──────────────────────────────────────────────────────────────
