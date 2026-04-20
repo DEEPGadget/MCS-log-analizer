@@ -10,14 +10,17 @@
 set -euo pipefail
 
 # ── 모델 선택 및 인자 파싱 ─────────────────────────────────────────────────
-# 사용: ./analyze.sh <tarball> [report-name] [--model <model-id>]
-# 예시: ./analyze.sh file.tar.gz name --model claude-haiku-4-5-20251001
-MODEL="claude-sonnet-4-6"
+# 기본값: Haiku triage로 복잡도 판별 후 Sonnet(moderate/simple) 또는 Opus(complex) 자동 선택
+# --model <id> : triage 건너뜀, 지정 모델 사용
+# --no-triage  : triage 건너뜀, Sonnet 사용
+MODEL=""
+SKIP_TRIAGE=false
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --model|-m) MODEL="$2"; shift 2 ;;
-        *)          POSITIONAL+=("$1"); shift ;;
+        --model|-m)  MODEL="$2"; shift 2 ;;
+        --no-triage) SKIP_TRIAGE=true; shift ;;
+        *)           POSITIONAL+=("$1"); shift ;;
     esac
 done
 (( ${#POSITIONAL[@]} > 0 )) && set -- "${POSITIONAL[@]}"
@@ -30,10 +33,12 @@ error() { echo -e "${RED}[✗]${NC} $*" >&2; }
 
 # ── 인자 확인 ──────────────────────────────────────────────────────────────
 if [ $# -lt 1 ]; then
-    echo "사용법: $0 <path-to-tar.gz> [report-name]"
+    echo "사용법: $0 <path-to-tar.gz> [report-name] [--model <model-id>] [--no-triage]"
     echo ""
     echo "  예시: $0 /path/to/Manycore-bug-report.tar.gz"
     echo "       $0 /path/to/Manycore-bug-report.tar.gz customer-abc-2026-04-07"
+    echo "       $0 /path/to/report.tar.gz --model claude-opus-4-7"
+    echo "       $0 /path/to/report.tar.gz --no-triage"
     exit 1
 fi
 
@@ -138,7 +143,7 @@ if [ -f "$JOURNALCTL" ]; then
 
     # 2) 구조적 이벤트: 키워드로 못 잡는 시스템 상태 변화
     grep -inE 'Reached target.*(Power-Off|Reboot|Shutdown|Multi-User)|logind.*(Power key|Lid|Suspend)|Started.*Shutdown|Stopping|Started.*Reboot|shutdown\[|reboot\[|Power-Off' \
-        "$JOURNALCTL" | head -500 > "$PREPROCESS_DIR/journalctl-lifecycle.txt" 2>/dev/null || true
+        "$JOURNALCTL" | head -200 > "$PREPROCESS_DIR/journalctl-lifecycle.txt" 2>/dev/null || true
 
     # 3) 시간대별 로그 밀도 (분 단위, 상위 50개 — 비정상 폭주 구간 탐지)
     #    특정 분에 로그가 수천 줄 몰리면 그 시간대에 사건 발생
@@ -156,7 +161,7 @@ if [ -f "$JOURNALCTL" ]; then
     # Boot 경계 직전 40줄 / 직후 10줄 추출 (종료 원인 포착 우선)
     if [ "$BOOT_COUNT" -gt 0 ]; then
         grep -n -B40 -A10 '^\-\- Boot' "$JOURNALCTL" \
-            | tail -2500 \
+            | tail -500 \
             > "$PREPROCESS_DIR/journalctl-boot-context.txt" 2>/dev/null || true
     fi
 
@@ -332,6 +337,53 @@ if [ -f "$SYSTEMCTL_FILE" ]; then
 fi
 
 info "로그 전처리 완료 → $PREPROCESS_DIR/"
+
+# ── 모델 자동 선택 (Haiku triage) ──────────────────────────────────────────
+if [ -n "$MODEL" ]; then
+    info "모델 수동 지정: $MODEL"
+elif [ "$SKIP_TRIAGE" = true ]; then
+    MODEL="claude-sonnet-4-6"
+    info "모델: $MODEL (triage 건너뜀)"
+else
+    info "모델 자동 선택 중 (Haiku triage)..."
+
+    TRIAGE_PROMPT="[TRIAGE MODE]
+이 호출은 복잡도 판별 전용입니다. 보고서를 작성하지 마세요. Write 도구를 사용하지 마세요.
+
+아래 파일들을 Read하여 Critical 신호 수를 파악하세요 (없는 파일은 건너뜀):
+- ${PREPROCESS_DIR}/journalctl-critical.txt
+- ${PREPROCESS_DIR}/journalctl-errors.txt
+- ${PREPROCESS_DIR}/journalctl-service-loops.txt
+- ${PREPROCESS_DIR}/_ecc-summary.txt
+- ${PREPROCESS_DIR}/_smart-summary.txt
+- ${PREPROCESS_DIR}/_systemctl-summary.txt
+- ${PREPROCESS_DIR}/dmesg-crash-context.txt
+- ${PREPROCESS_DIR}/dmesg-critical.txt
+
+복잡도 기준:
+- complex: 서로 다른 소스에서 Critical 신호가 3개 이상이거나, soft lockup·OOM·service-loop·ECC 중 2개 이상이 동시에 존재하여 다중 소스 인과관계 분석이 필요한 경우
+- moderate: Critical 신호 1~2개
+- simple: Critical 신호 없음 (Warning·Info만 존재)
+
+파일을 모두 읽은 후 아래 두 줄만 출력하세요. 다른 텍스트를 출력하지 마세요:
+COMPLEXITY: simple|moderate|complex
+CRITICAL_COUNT: N"
+
+    TRIAGE_OUT=$(claude --dangerously-skip-permissions -p "$TRIAGE_PROMPT" \
+        --model "claude-haiku-4-5-20251001" --max-turns 15 2>/dev/null \
+        || echo "COMPLEXITY: moderate")
+
+    COMPLEXITY=$(printf '%s' "$TRIAGE_OUT" | grep '^COMPLEXITY:' | awk '{print $2}' | tr -d '[:space:]')
+    CRITICAL_N=$(printf '%s' "$TRIAGE_OUT" | grep '^CRITICAL_COUNT:' | awk '{print $2}' | tr -d '[:space:]')
+    CRITICAL_N="${CRITICAL_N:-?}"
+
+    case "$COMPLEXITY" in
+        complex)  MODEL="claude-opus-4-7";   info "  triage → Opus (complex, Critical ${CRITICAL_N}개)" ;;
+        moderate) MODEL="claude-sonnet-4-6"; info "  triage → Sonnet (moderate, Critical ${CRITICAL_N}개)" ;;
+        simple)   MODEL="claude-sonnet-4-6"; info "  triage → Sonnet (simple)" ;;
+        *)        MODEL="claude-sonnet-4-6"; warn "  triage 파싱 실패 → Sonnet (기본값 사용)" ;;
+    esac
+fi
 
 # ── 파일 매니페스트 생성 ───────────────────────────────────────────────────
 info "파일 매니페스트 생성 중..."
