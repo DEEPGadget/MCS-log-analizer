@@ -76,6 +76,29 @@ info "보고서 저장 경로: $REPORT_FILE"
 
 mkdir -p "$REPORT_DIR"
 
+# ── 토큰 사용량 로깅 헬퍼 ──────────────────────────────────────────────────
+TOKEN_LOG="$REPORT_DIR/_token-log.tsv"
+log_tokens() {
+    local phase="$1" model="$2" usage_json="$3"
+    if [ -z "$usage_json" ] || [ "$usage_json" = "null" ] || [ "$usage_json" = "{}" ]; then
+        return
+    fi
+    if [ ! -f "$TOKEN_LOG" ]; then
+        printf 'timestamp\tarchive\tmodel\tphase\tinput\toutput\tcache_read\tcache_creation\n' \
+            > "$TOKEN_LOG"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$(date -Iseconds)" \
+        "$BASENAME" \
+        "$model" \
+        "$phase" \
+        "$(printf '%s' "$usage_json" | jq -r '.input_tokens // 0')" \
+        "$(printf '%s' "$usage_json" | jq -r '.output_tokens // 0')" \
+        "$(printf '%s' "$usage_json" | jq -r '.cache_read_input_tokens // 0')" \
+        "$(printf '%s' "$usage_json" | jq -r '.cache_creation_input_tokens // 0')" \
+        >> "$TOKEN_LOG"
+}
+
 # ── 로그 전처리 (토큰 절약) ─────────────────────────────────────────────
 # Claude 호출 전에 bash로 대형 로그를 정제한다.
 # 이 단계는 토큰을 소모하지 않는다.
@@ -119,11 +142,12 @@ if [ -f "$JOURNALCTL" ]; then
             | grep -v 'Modules linked in\|soft lockup' | head -80
     } > "$PREPROCESS_DIR/journalctl-critical.txt" 2>/dev/null || true
 
-    # 1b) Tier 2: 광범위 패턴 → 타임스탬프·호스트명 제거 후 중복 제거 → 빈도 상위 200행
-    #     수십만 줄 → 200줄 빈도표로 압축. 형식: "  횟수 process: 메시지"
+    # 1b) Tier 2: 광범위 패턴 → 타임스탬프·호스트명 제거 후 중복 제거 → 빈도 상위 100행
+    #     수십만 줄 → 100줄 빈도표로 압축. 형식: "  횟수 process: 메시지"
+    #     (이전엔 200행이었으나 100행으로도 패턴 파악 충분, 토큰 절약)
     grep -iE 'fail|error|warning|killed|watchdog|critical|oom|panic|segfault' "$JOURNALCTL" \
         | sed -E 's/^[A-Za-z]+ {1,2}[0-9]+ [0-9:]+ [^ ]+ //' \
-        | sort | uniq -c | sort -rn | head -200 \
+        | sort | uniq -c | sort -rn | head -100 \
         > "$PREPROCESS_DIR/journalctl-errors.txt" 2>/dev/null || true
 
     # 1c) 서비스 재시작 루프 감지 — restart counter가 높은 서비스 요약
@@ -217,22 +241,11 @@ if [ -f "$DMESG_FULL" ]; then
             "$DMESG_FULL" >> "$PREPROCESS_DIR/dmesg-crash-context.txt" 2>/dev/null || true
     fi
     # 일반 에러 필터 (dmesg-errors.txt 보완 — err 미만 레벨 포함)
+    # head -150은 보완 목적상 충분 (Critical 신호는 dmesg-errors.txt / dmesg-crash-context.txt에서 이미 캡처됨)
     grep -inE 'error|fail|warning|EDAC|MCE|Machine Check|I/O error|blk_update_request|SCSI|RAID|md:|NFS|Lustre|filesystem' \
-        "$DMESG_FULL" | head -300 > "$PREPROCESS_DIR/dmesg-full-errors.txt" 2>/dev/null || true
+        "$DMESG_FULL" | head -150 > "$PREPROCESS_DIR/dmesg-full-errors.txt" 2>/dev/null || true
     info "  dmesg (full): ${DMESG_FULL_LINES} 줄 → crash-context ${CRASH_LINES} 줄, errors $(wc -l < "$PREPROCESS_DIR/dmesg-full-errors.txt") 줄"
 fi
-
-# --- 에러 빈도 집계 (전체 소스 통합) ---
-# 반복되는 동일 에러 메시지를 집약하여 Claude가 "N회 반복"으로 처리하도록 돕는다
-for src in "$PREPROCESS_DIR"/syslog-errors.txt "$PREPROCESS_DIR"/kern-errors.txt; do
-    if [ -f "$src" ]; then
-        basename_src="$(basename "$src" .txt)"
-        # 타임스탬프 제거 후 메시지 본문만으로 빈도 집계
-        sed -E 's/^[0-9]+[:-].{0,20}//' "$src" \
-            | sort | uniq -c | sort -rn | head -100 \
-            > "$PREPROCESS_DIR/${basename_src}-frequency.txt" 2>/dev/null || true
-    fi
-done
 
 # --- hw-list.txt → 하드웨어 요약 (_hw-summary.txt) ---
 # Claude의 *-core/*-cpu/*-memory/*-bank Grep 4회를 Read 1회로 대체
@@ -369,9 +382,20 @@ else
 COMPLEXITY: simple|moderate|complex
 CRITICAL_COUNT: N"
 
-    TRIAGE_OUT=$(claude --dangerously-skip-permissions -p "$TRIAGE_PROMPT" \
-        --model "claude-haiku-4-5-20251001" --max-turns 15 2>/dev/null \
-        || echo "COMPLEXITY: moderate")
+    # cwd를 압축 해제 디렉터리로 변경하여 프로젝트 CLAUDE.md 자동 로드 회피.
+    # Haiku triage는 두 줄(COMPLEXITY/CRITICAL_COUNT)만 출력하므로 24KB 가이드가 불필요.
+    # --output-format json: 응답 + usage를 한 JSON 객체로 받음
+    TRIAGE_RAW=$(cd "$EXTRACTED_DIR" && claude --dangerously-skip-permissions -p "$TRIAGE_PROMPT" \
+        --model "claude-haiku-4-5-20251001" --max-turns 15 \
+        --output-format json 2>/dev/null) || TRIAGE_RAW=''
+
+    if [ -n "$TRIAGE_RAW" ]; then
+        TRIAGE_OUT=$(printf '%s' "$TRIAGE_RAW" | jq -r '.result // ""')
+        TRIAGE_USAGE=$(printf '%s' "$TRIAGE_RAW" | jq -c '.usage // empty')
+        log_tokens "triage" "claude-haiku-4-5-20251001" "$TRIAGE_USAGE"
+    else
+        TRIAGE_OUT="COMPLEXITY: moderate"
+    fi
 
     COMPLEXITY=$(printf '%s' "$TRIAGE_OUT" | grep '^COMPLEXITY:' | awk '{print $2}' | tr -d '[:space:]')
     CRITICAL_N=$(printf '%s' "$TRIAGE_OUT" | grep '^CRITICAL_COUNT:' | awk '{print $2}' | tr -d '[:space:]')
@@ -482,13 +506,15 @@ PROMPT="로그 분석 작업을 시작합니다.
 압축 해제된 진단 아카이브 경로: ${EXTRACTED_DIR}
 보고서 저장 경로: ${REPORT_FILE}
 분석 시작 시각: ${ANALYSIS_START_TIME} (보고서 메타데이터의 분석 일시에 이 값을 사용하세요)
+COMPLEXITY: ${COMPLEXITY:-moderate}
 
 전처리 결과: ${EXTRACTED_DIR}/_preprocessed/ 디렉터리에 정제된 로그 파일이 있습니다.
 환경 정보: ${EXTRACTED_DIR}/_env-hints.txt
 파일 매니페스트: ${EXTRACTED_DIR}/_manifest.txt
 
 CLAUDE.md의 분석 가이드라인을 따라 위 경로의 로그 파일들을 분석하고,
-지정된 보고서 저장 경로에 Write 도구로 보고서를 저장해 주세요."
+지정된 보고서 저장 경로에 Write 도구로 보고서를 저장해 주세요.
+COMPLEXITY 값에 따라 분석 깊이를 조정하세요 (CLAUDE.md의 'COMPLEXITY 기반 분석 깊이 분기' 표 참조)."
 
 # ── Claude 실행 ────────────────────────────────────────────────────────────
 # --dangerously-skip-permissions : 자동화 실행 — 모든 도구 권한 자동 승인
@@ -498,8 +524,23 @@ CLAUDE.md의 분석 가이드라인을 따라 위 경로의 로그 파일들을 
 echo ""
 info "Claude 분석 시작..."
 echo "────────────────────────────────────────────────────────────────"
-claude --dangerously-skip-permissions -p "$PROMPT" --model "$MODEL"
+# --output-format stream-json --verbose : 매 줄 한 JSON 이벤트
+# tee로 전체 스트림을 보존하면서 jq로 텍스트만 골라 stdout에 표시
+MAIN_STREAM="$WORKSPACE/_main-stream.jsonl"
+claude --dangerously-skip-permissions -p "$PROMPT" --model "$MODEL" \
+    --output-format stream-json --verbose 2>&1 \
+    | tee "$MAIN_STREAM" \
+    | jq -r --unbuffered '
+        select(.type == "assistant")
+        | (.message.content // .content // [])[]?
+        | select(.type == "text")
+        | .text
+      ' 2>/dev/null || true
 echo "────────────────────────────────────────────────────────────────"
+
+# 마지막 result 이벤트에서 usage 추출
+MAIN_USAGE=$(jq -c 'select(.type == "result") | .usage // empty' "$MAIN_STREAM" 2>/dev/null | tail -1)
+log_tokens "main" "$MODEL" "$MAIN_USAGE"
 
 # ── 결과 확인 ──────────────────────────────────────────────────────────────
 if [ -f "$REPORT_FILE" ]; then

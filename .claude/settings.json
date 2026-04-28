@@ -1,4 +1,12 @@
 {
+  "permissions": {
+    "allow": [
+      "Read(/tmp/mcs-log-*/**)",
+      "Read(/home/deepgadget/MCS-log-analyzer/**)",
+      "Grep",
+      "Write(/home/deepgadget/MCS-log-analyzer/reports/**)"
+    ]
+  },
   "hooks": {
     "PostToolUse": [
       {
@@ -17,7 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "REPORT_COUNT=$(ls /home/deepgadget/MCS_log_analizer/reports/*.md 2>/dev/null | wc -l); echo \"[hook:Stop] 분석 완료. 누적 보고서 수: ${REPORT_COUNT}개\""
+            "command": "REPORT_COUNT=$(ls /home/deepgadget/MCS-log-analyzer/reports/*.md 2>/dev/null | wc -l); echo \"[hook:Stop] 분석 완료. 누적 보고서 수: ${REPORT_COUNT}개\""
           }
         ]
       }
