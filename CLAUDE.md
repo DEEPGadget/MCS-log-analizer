@@ -64,6 +64,11 @@ COMPLEXITY: simple | moderate | complex   (analyze.sh의 Haiku triage 결과)
 
 ### Pass 1 — Triage (빠른 탐색)
 
+**성능 가이드 — 병렬 Read 필수**: 아래 1~6번 단계의 Read 작업은 서로 의존성이 없다.
+**가능한 한 단일 응답 블록 안에서 모든 Read 도구를 동시에 호출**하라
+(한 응답에 Read를 여러 번 포함). 순차 Read는 turn 수를 늘려 cache_read 토큰을
+크게 증가시키므로 금지. 파일이 존재하지 않으면 그 Read만 실패하고 나머지는 계속된다.
+
 1. `_manifest.txt`를 Read하여 아카이브 전체 파일 구조와 크기를 파악한다
 2. `_env-hints.txt`를 Read하여 환경 정보(`ENV_TYPE`, 호스트명)를 확인한다
 3. **인벤토리 소스 먼저 Read** (이후 분석의 컨텍스트가 되므로 우선 파악):

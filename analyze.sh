@@ -10,17 +10,26 @@
 set -euo pipefail
 
 # ── 모델 선택 및 인자 파싱 ─────────────────────────────────────────────────
-# 기본값: Haiku triage로 복잡도 판별 후 Sonnet(moderate/simple) 또는 Opus(complex) 자동 선택
-# --model <id> : triage 건너뜀, 지정 모델 사용
-# --no-triage  : triage 건너뜀, Sonnet 사용
+# 기본값(prod): Haiku triage로 복잡도 판별 후 Sonnet(moderate/simple) 또는 Opus(complex) 자동 선택
+# 개발 모드: Sonnet 강제 + triage 건너뜀 (Haiku 비용 + Opus 비용 모두 회피)
+#   - `MCS_DEV=1` env var 설정 시 활성화 (개발 셸에서 export 해두면 편함)
+#   - `--dev` flag 로 1회 한정 활성화
+#   - `--prod` flag 로 dev 모드 무시 (env가 설정돼 있어도 prod 동작)
+# 기타 플래그:
+#   --model <id> : 모델 수동 지정 (triage 건너뜀, 최우선 순위)
+#   --no-triage  : --dev 와 동일 (하위 호환)
 MODEL=""
 SKIP_TRIAGE=false
+if [ "${MCS_DEV:-0}" = "1" ]; then
+    SKIP_TRIAGE=true
+fi
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --model|-m)  MODEL="$2"; shift 2 ;;
-        --no-triage) SKIP_TRIAGE=true; shift ;;
-        *)           POSITIONAL+=("$1"); shift ;;
+        --model|-m)         MODEL="$2"; shift 2 ;;
+        --dev|--no-triage)  SKIP_TRIAGE=true; shift ;;
+        --prod)             SKIP_TRIAGE=false; shift ;;
+        *)                  POSITIONAL+=("$1"); shift ;;
     esac
 done
 (( ${#POSITIONAL[@]} > 0 )) && set -- "${POSITIONAL[@]}"
@@ -33,12 +42,19 @@ error() { echo -e "${RED}[✗]${NC} $*" >&2; }
 
 # ── 인자 확인 ──────────────────────────────────────────────────────────────
 if [ $# -lt 1 ]; then
-    echo "사용법: $0 <path-to-tar.gz> [report-name] [--model <model-id>] [--no-triage]"
+    echo "사용법: $0 <path-to-tar.gz> [report-name] [--dev|--prod|--model <id>|--no-triage]"
     echo ""
-    echo "  예시: $0 /path/to/Manycore-bug-report.tar.gz"
-    echo "       $0 /path/to/Manycore-bug-report.tar.gz customer-abc-2026-04-07"
+    echo "  기본(prod): Haiku triage → Sonnet/Opus 자동 선택"
+    echo "  --dev    : Sonnet 강제, triage 건너뜀 (개발용 저렴 모드)"
+    echo "  --prod   : prod 동작 강제 (MCS_DEV=1 env 무시)"
+    echo "  --model X: 모델 수동 지정"
+    echo ""
+    echo "  환경변수 MCS_DEV=1 → --dev 와 동일 효과 (셸에 export 해두면 편함)"
+    echo ""
+    echo "  예시: $0 /path/to/report.tar.gz"
+    echo "       $0 /path/to/report.tar.gz customer-abc-2026-04-07"
+    echo "       MCS_DEV=1 $0 /path/to/report.tar.gz       # 개발 모드"
     echo "       $0 /path/to/report.tar.gz --model claude-opus-4-7"
-    echo "       $0 /path/to/report.tar.gz --no-triage"
     exit 1
 fi
 
@@ -360,10 +376,9 @@ elif [ "$SKIP_TRIAGE" = true ]; then
 else
     info "모델 자동 선택 중 (Haiku triage)..."
 
-    TRIAGE_PROMPT="[TRIAGE MODE]
-이 호출은 복잡도 판별 전용입니다. 보고서를 작성하지 마세요. Write 도구를 사용하지 마세요.
+    TRIAGE_PROMPT="[TRIAGE MODE — 복잡도 판별 전용. 보고서 작성·Write 도구 사용 금지.]
 
-아래 파일들을 Read하여 Critical 신호 수를 파악하세요 (없는 파일은 건너뜀):
+아래 파일들을 **단일 응답 블록 안에서 병렬로 Read** 하세요 (모든 Read 호출을 한 응답에 묶어 호출 — 순차 호출 금지). 의존성이 없으므로 한 번에 호출 가능합니다:
 - ${PREPROCESS_DIR}/journalctl-critical.txt
 - ${PREPROCESS_DIR}/journalctl-errors.txt
 - ${PREPROCESS_DIR}/journalctl-service-loops.txt
@@ -373,12 +388,14 @@ else
 - ${PREPROCESS_DIR}/dmesg-crash-context.txt
 - ${PREPROCESS_DIR}/dmesg-critical.txt
 
-복잡도 기준:
-- complex: 서로 다른 소스에서 Critical 신호가 3개 이상이거나, soft lockup·OOM·service-loop·ECC 중 2개 이상이 동시에 존재하여 다중 소스 인과관계 분석이 필요한 경우
-- moderate: Critical 신호 1~2개
-- simple: Critical 신호 없음 (Warning·Info만 존재)
+(없는 파일은 자동 건너뜁니다.)
 
-파일을 모두 읽은 후 아래 두 줄만 출력하세요. 다른 텍스트를 출력하지 마세요:
+복잡도 기준:
+- complex: 서로 다른 소스에서 Critical 신호 ≥3, 또는 soft lockup·OOM·service-loop·ECC 중 ≥2 동시 존재
+- moderate: Critical 신호 1~2개
+- simple: Critical 신호 없음
+
+**출력 규칙 (엄수)**: 분석 과정·해설·요약·중간 텍스트를 일체 출력하지 마세요. Read 완료 후 마지막 응답에 정확히 아래 두 줄만 포함하세요. 그 외 토큰은 비용 낭비입니다:
 COMPLEXITY: simple|moderate|complex
 CRITICAL_COUNT: N"
 
