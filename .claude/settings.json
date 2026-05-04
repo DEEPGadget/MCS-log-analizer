@@ -8,6 +8,17 @@
     ]
   },
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "p=$(jq -r \".tool_input.file_path\"); rp=$(realpath -m \"$p\" 2>/dev/null || echo \"$p\"); case \"$rp\" in /home/deepgadget/MCS-log-analyzer/reports/*) exit 0 ;; *) echo \"[hook:PreToolUse] Write 차단: $p 는 reports/ 외부입니다\" >&2; exit 2 ;; esac"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Write",
